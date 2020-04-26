@@ -1,0 +1,170 @@
+#importing necessary libraries
+import matplotlib.pyplot as plt
+import torch
+import numpy as np
+from torch import nn
+from torch import optim
+from torchvision import datasets, models, transforms
+import torch.nn.functional as F
+import torch.utils.data
+import pandas as pd
+from collections import OrderedDict
+from PIL import Image
+import argparse
+import json
+
+# define Mandatory and Optional Arguments for the script
+parser = argparse.ArgumentParser (description = "Parser of prediction script")
+
+parser.add_argument ('image_dir', help = 'Image Path is .... . required argument', type = str)
+parser.add_argument ('load_dir', help = 'Provide path to checkpoint. Mandatory argument', type = str)
+parser.add_argument ('--top_k', help = 'Top K most likely classes. Optional', type = int)
+parser.add_argument ('--category_names', help = 'Mapping of categories to real names. JSON file name to be provided. Optional', type = str)
+parser.add_argument ('--gpu', help = "Option to use GPU. Optional", type = str)
+
+# TODO: Write a function that loads a checkpoint and rebuilds the model
+#START  of check point**
+def load_checkpoint(filepath):
+    
+    # Checkpoint for when using GPU
+    checkpoint = torch.load(filepath)
+ 
+    if checkpoint ['arch'] == 'vgg13':
+        model = models.vgg13(pretrained = True)
+    else: 
+        model = models.alexnet(pretrained = True)
+        
+    #model.class_to_idx = checkpoint['class_to_idx']
+    
+    model.classifier = checkpoint['classifier']
+    model.load_state_dict(checkpoint ['state_dict'])
+    model.class_to_idx = checkpoint['class_to_idx']
+    
+    for param in model.parameters():
+        param.requires_grad = False #turning off tuning of the model
+    
+    return model
+
+#END  of check point**
+
+# process into a PIL image 
+def process_image(image):
+    ''' Scales, crops, and normalizes a PIL image for a PyTorch model,
+        returns an Numpy array
+    '''    
+    Input_transforms = transforms.Compose([transforms.RandomRotation(30),
+                                       transforms.RandomResizedCrop(224),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize([0.485, 0.456, 0.406],
+                                                            [0.229, 0.224, 0.225])])
+     
+    # TODO: Process a PIL image for use in a PyTorch model
+    input_image = Image.open(image)
+    processed_img = Input_transforms(input_image)
+    
+    return processed_img    
+    
+def predict(image_path, model, k, device):
+    ''' Predict the class (or classes) of an image using a trained deep learning model.
+    
+    image_path: string. Path to image, directly to image and not to folder.
+    model: pytorch neural network.
+    top_k: integer. The top K classes to be calculated
+    
+    returns top_probabilities(k), top_labels
+    '''
+    
+    #preprocess the image
+    pytorch_tensor = torch.tensor(process_image(image_path))
+    
+    #convert the img variable from numpy to pytorch tensor 
+     #convert the img variable from numpy to pytorch tensor 
+    if device == 'cuda':
+        torch_image = torch.from_numpy (pytorch_tensor.numpy()).type (torch.cuda.FloatTensor)
+    else:
+        torch_image = torch.from_numpy (pytorch_tensor.numpy()).type (torch.FloatTensor)
+        
+    torch_image = torch_image.unsqueeze(0) #adds a batch number to the image shape
+
+    
+    model.to (device)
+    torch_image.to (device)
+
+    # Set model to evaluate
+    model.eval()
+  
+    
+    # predict the possibilites using the model i.e. model = load_checkpoint('Mycheckpoint.pth')
+    log_probs = model.forward(torch_image) 
+
+    # Get the real probabilities i.e. exp(log(probability))
+    linear_probs = torch.exp(log_probs)
+
+    # Finding the top 'k' probabilites
+    top_probs, top_labels = linear_probs.topk(k)
+    
+    # Convert top_probs, top_labels from tensors to numpy arrays
+    top_probs = np.array(top_probs.detach())[0] 
+    top_labels = np.array(top_labels.detach())[0]
+        
+    # Convert to classes using a for loop with dictionary to get a from index to class.
+    idx_to_class = {value : key for key, value in model.class_to_idx.items()}
+    #print(idx_to_class)
+   
+    top_labels_list = []
+    top_flowers_list = []
+    for alabel in top_labels:
+        top_labels_list.append(idx_to_class[alabel])
+        top_flowers_list.append(cat_to_name[idx_to_class[alabel]])
+
+
+    top_labels = [idx_to_class[label_no] for label_no in top_labels]
+    top_flowers = [cat_to_name[label_no] for label_no in top_labels]
+    
+    print('top_probs', top_probs)
+    print('top_labels_list', top_labels_list)
+    
+    print('top_flowers_list', top_flowers_list)
+    #print('top_labels', top_labels)
+    #print('top_flowers', top_flowers)
+    
+    return top_probs, top_labels, top_flowers    
+
+
+#setting values data loading
+args = parser.parse_args ()
+file_path = args.image_dir
+
+#defining device: either cuda or cpu
+#device = 'cuda' or devive = 'cpu'
+if args.gpu == 'gpu':
+    device = 'cuda'
+    print('using GPU')
+else:
+    device = 'cpu'
+    print('using CPU')
+
+#Check for json file
+if args.category_names:
+    with open(args.category_names, 'r') as f:
+        cat_to_name = json.load(f)
+else:
+    with open('cat_to_name.json', 'r') as f:
+        cat_to_name = json.load(f)
+        pass
+
+#loading model from checkpoint provided
+model = load_checkpoint(args.load_dir)
+
+#defining number of classes to be predicted. Default = 1
+if args.top_k:
+    k = args.top_k
+else:
+    k = 3
+
+#calculating probabilities and classes
+probs, classes, flowers = predict(file_path, model, k, device)
+
+
+

@@ -1,0 +1,284 @@
+#all imports
+import argparse
+import torch
+from collections import OrderedDict
+from torch import nn
+from torch import optim
+from torchvision import datasets, models, transforms
+import torch.nn.functional as F
+import torch.utils.data
+import pandas as pd
+import numpy as np
+from PIL import Image
+import json
+import matplotlib.pyplot as plt
+import time
+
+# provide parser arguments 
+parser = argparse.ArgumentParser (description = "train.py's parser")
+
+parser.add_argument ('data_dir', help = ' Dataset directory or path of the dataset which is the required argument', type = str)
+#parser.add_argument ('--save_dir', help = 'provide path for saving the checkpoint file', type = str)
+parser.add_argument ('--arch', help = 'architecture for the network', type = str)
+parser.add_argument ('--learning_rate', help = 'learning rate, default is 0.001', type = float)
+parser.add_argument ('--hidden_units', help = 'Hidden units in Classifier. Default value is 2048', type = int)
+parser.add_argument ('--epochs', help = 'num of epochs', type = int)
+parser.add_argument ('--gpu', help = "cpu or cuda", type = str)
+parser.add_argument('--save_dir', help= "The name and directory for the checkpoints", action="store", default="./checkpoint.pth")
+
+
+args = parser.parse_args ()
+
+data_dir = args.data_dir
+train_dir = data_dir + '/train'
+valid_dir = data_dir + '/valid'
+test_dir = data_dir + '/test'
+
+#device = 'cuda' or device = 'cpu'
+if args.gpu == 'gpu':
+    device = 'cuda'
+    print('using GPU')
+else:
+    device = 'cpu'
+    print('using CPU')
+    
+#check if a dataset was provided and then proceed to data transforms and load data 
+if data_dir: 
+    # Define your transforms for the training, validation, and testing sets
+    train_transforms = transforms.Compose([transforms.RandomRotation(30),
+                                       transforms.RandomResizedCrop(224),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize([0.485, 0.456, 0.406],
+                                                            [0.229, 0.224, 0.225])])
+
+    test_transforms = transforms.Compose([transforms.Resize(255),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406],
+                                                           [0.229, 0.224, 0.225])])
+
+    valid_transforms = transforms.Compose([transforms.Resize(255),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406],
+                                                           [0.229, 0.224, 0.225])])
+                                                
+    #loading the datasets with transforms
+    train_data = datasets.ImageFolder(data_dir + '/train', transform=train_transforms)
+    valid_data = datasets.ImageFolder(data_dir + '/valid', transform=valid_transforms)
+    test_data = datasets.ImageFolder(data_dir + '/test', transform=test_transforms)
+
+    # define the dataloaders
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size = 64, shuffle = True)
+    valid_loader = torch.utils.data.DataLoader(valid_data, batch_size = 64, shuffle = True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size = 64, shuffle = True)
+   
+
+#label to category mapping
+with open('cat_to_name.json', 'r') as f:
+    cat_to_name = json.load(f)
+
+#check from here**
+def load_model (arch, hidden_units):
+    if arch == 'alexnet':
+        print('using', arch)
+        model = models.alexnet(pretrained = True)
+        for param in model.parameters():
+            param.requires_grad = False
+        if hidden_units: #in case hidden_units were given
+            print('using custom hidden_units')
+            classifier = nn.Sequential  (OrderedDict ([
+                            ('fc1', nn.Linear (9216, 4096)),
+                            ('relu1', nn.ReLU ()),
+                            ('dropout1', nn.Dropout (p = 0.2)),
+                            ('fc2', nn.Linear (4096, hidden_units)),
+                            ('relu2', nn.ReLU ()),
+                            ('dropout2', nn.Dropout (p = 0.2)),
+                            ('fc3', nn.Linear (hidden_units, 102)),
+                            ('output', nn.LogSoftmax (dim =1))
+                            ]))
+        else: 
+            classifier = nn.Sequential  (OrderedDict ([
+                        ('fc1', nn.Linear (9216, 4096)),
+                        ('relu1', nn.ReLU ()),
+                        ('dropout1', nn.Dropout (p = 0.2)),
+                        ('fc2', nn.Linear (4096, 2048)),
+                        ('relu2', nn.ReLU ()),
+                        ('dropout2', nn.Dropout (p = 0.2)),
+                        ('fc3', nn.Linear (2048, 102)),
+                        ('output', nn.LogSoftmax (dim =1))
+                        ]))
+    else: 
+        arch = 'vgg13' 
+        print('using', arch)
+        model = models.vgg13 (pretrained = True)
+        for param in model.parameters():
+            param.requires_grad = False
+        if hidden_units: 
+            print('using custom hidden_units')
+            classifier = nn.Sequential  (OrderedDict ([
+                            ('fc1', nn.Linear (25088, 4096)),
+                            ('relu1', nn.ReLU ()),
+                            ('dropout1', nn.Dropout (p = 0.2)),
+                            ('fc2', nn.Linear (4096, hidden_units)),
+                            ('relu2', nn.ReLU ()),
+                            ('dropout2', nn.Dropout (p = 0.2)),
+                            ('fc3', nn.Linear (hidden_units, 102)),
+                            ('output', nn.LogSoftmax (dim =1))
+                            ]))
+        else: 
+            classifier = nn.Sequential(OrderedDict([
+                          ('fc1', nn.Linear(25088, 4096)),
+                          ('relu', nn.ReLU()),
+                          ('dropout1', nn.Dropout(p=0.2)),                          
+                          ('fc2', nn.Linear(4096, 784)),
+                          ('relu', nn.ReLU()),
+                          ('dropout2', nn.Dropout(p=0.2)),
+                          ('fc3', nn.Linear(784, 102)),
+                          ('output', nn.LogSoftmax(dim=1))
+                          ]))  
+    model.classifier = classifier 
+    return model, arch
+
+
+#loading model using above defined functiion
+model, arch = load_model(args.arch, args.hidden_units)
+
+# Recommended to use NLLLoss when using Softmax
+criterion = nn.NLLLoss()
+
+if args.learning_rate: #if learning rate was provided
+    optimizer = optim.Adam(model.classifier.parameters (), lr = args.learning_rate)
+else:# Using Adam optimiser which makes use of momentum to avoid local minima
+    optimizer = optim.Adam(model.classifier.parameters (), lr = 0.0008)
+    
+model.to (device) #device can be either cuda or cpu
+
+
+#print_every = 40
+#steps = 0    
+
+
+#write training and validation codes here**
+for device in [device]:
+    
+    #set the num of epochs
+    if args.epochs:
+        epochs = args.epochs
+    else:
+        epochs = 3
+
+    #epochs = 3  
+    print_for_every = 30
+    steps = 0
+    
+    # change to 'cuda' (gpu) or 'cpu' mode
+    model.to(device)
+    #print(device)
+
+    for e in range(epochs):
+        start = time.time()
+        running_loss = 0
+
+        # train using the trainloader
+        for ii, (inputs, labels) in enumerate(train_loader):
+            
+            steps += 1
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # zero the parameter gradients
+            optimizer.zero_grad()
+
+            # forward, backward passes
+            outputs = model.forward(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            #print("the II is: ",ii)
+            #print("size is: ", len(inputs))
+
+            # find validation accuracy and loss only when,
+            if steps % print_for_every == 0:
+                
+                # change model to evaluation mode from training mode
+                model.eval()
+
+                # Gradients can be turned off in validation mode
+                with torch.no_grad():
+                    accuracy = 0
+                    valid_loss = 0
+                    
+
+                    # change model to gpu or cpu
+                    model.to(device)
+
+                    # Loop over data using validloader
+                    for ii, (inputs, labels) in enumerate(valid_loader):
+
+                    
+                        inputs, labels = inputs.to(device), labels.to(device)
+
+                        # Forward passing validation data for prediction
+                        output = model.forward(inputs)
+                        # Calculate validation loss
+                        valid_loss += criterion(output, labels).item()
+                        # Calculate the real probabilities from logsoftmax outputs
+                        ps = torch.exp(output)
+                        
+                        # Calculate the accuracy
+                        top_p, top_class = ps.topk(1, dim=1)
+                        equals = top_class == labels.view(*top_class.shape)
+                        accuracy += torch.mean(equals.type(torch.FloatTensor)).item()
+
+
+
+                print(f"number of epochs: {e+1}/{epochs} \
+                Training Loss: {round(running_loss/print_for_every,2)} \
+                Valid Loss: {round(valid_loss/len(valid_loader),2)} \
+                Valid Accuracy: {round(float(accuracy/len(valid_loader)),2)}")
+
+                
+                running_loss = 0
+                # Turn training mode on 
+                model.train()
+
+        #time_taken = time.time() - start
+        print(f"Time taken for epoch: {time.time() - start} seconds")
+
+#END OF write training and validation codes here**
+
+
+
+#saving trained Model
+#model.to ('cpu') #no need to use cuda for saving/loading model.
+
+
+# Save the checkpoint
+model.class_to_idx = train_data.class_to_idx 
+
+#creating dictionary for model saving
+checkpoint = {'state_dict': model.state_dict(),
+              'classifier': model.classifier,
+              'class_to_idx': train_data.class_to_idx,
+              
+              'arch': arch,
+              'opt_state': optimizer.state_dict,
+              'num_epochs': epochs}
+#'mapping':    model.class_to_idx,
+
+#save the model in the checkpoint file
+'''
+if args.save_dir:
+    torch.save(checkpoint, args.save_dir + 'checkpoint.pth')
+else:
+    torch.save(checkpoint, 'checkpoint.pth')
+'''    
+
+chkpnt = args.save_dir
+torch.save(checkpoint, chkpnt) 
+
+
+    
